@@ -48,40 +48,24 @@ EndStockCount AS (
         IM_Temp.PhysicalInventoryBalance,
         IM_Temp.LoggingTimeStamp,
         IM_Temp.DeliveryDate,
-        COALESCE(
-            (
-                SELECT TOP 1
-                    PCL.NewPrice
-                FROM monitor.PriceChangeLog PCL
-                WHERE 1 = 1
-                AND 1 = 1
-                    AND PCL.PartId = IM_Temp.PartId
-                    AND PCL.PriceType = 0
-                    AND PCL.[Timestamp] <= STRING(DATEFORMAT(IM_Temp.DeliveryDate, 'YYYY-MM-DD'), 'T23:59:59.9999999+07:00')
-                ORDER BY
-                    PCL.[Timestamp] DESC
-            ),
-            0
-        ) AS StandardPrice,
-        COALESCE(IM_Temp.PhysicalInventoryBalance, 0) * COALESCE(
-            (
-                SELECT TOP 1
-                    PCL.NewPrice
-                FROM monitor.PriceChangeLog PCL
-                WHERE 1 = 1
-                AND 1 = 1
-                    AND PCL.PartId = IM_Temp.PartId
-                    AND PCL.PriceType = 0
-                    AND PCL.[Timestamp] <= STRING(DATEFORMAT(IM_Temp.DeliveryDate, 'YYYY-MM-DD'), 'T23:59:59.9999999+07:00')
-                ORDER BY
-                    PCL.[Timestamp] DESC
-            ),
-            0
-        ) AS Amount
+        COALESCE(PCL.NewPrice, 0) AS StandardPrice,
+        COALESCE(IM_Temp.PhysicalInventoryBalance, 0) * COALESCE(PCL.NewPrice, 0) AS Amount
     FROM monitor.InventoryMovement IM_Temp
+    LEFT OUTER JOIN (
+        SELECT
+            ROW_NUMBER() OVER (PARTITION BY PCL.PartId ORDER BY PCL.[TimeStamp] DESC) AS RowNumber,
+            PCL.PartId,
+            PCL.NewPrice
+        FROM monitor.PriceChangeLog PCL
+        WHERE 1 = 1
+            AND PCL.PriceType = 0
+            AND DATEFORMAT(PCL.[Timestamp], 'YYYY-MM-DD') <= DATEFORMAT(:Setting_EndDate, 'YYYY-MM-DD')
+    ) PCL ON 1 = 1
+        AND PCL.PartId = IM_Temp.PartId
+        AND PCL.RowNumber = 1
     WHERE 1 = 1
         AND IM_Temp.BusinessTransactionContextType = 4
-        AND IM_Temp.DeliveryDate = :Setting_EndDate
+        AND DATEFORMAT(IM_Temp.DeliveryDate, 'YYYY-MM-DD') = DATEFORMAT(:Setting_EndDate, 'YYYY-MM-DD')
 )
 SELECT
     P.PartNumber,
@@ -149,7 +133,7 @@ INNER JOIN (
         PL_Temp.LocationName
     FROM monitor.InventoryMovement PL_Temp
     WHERE PL_Temp.WarehouseId = 1
-        AND PL_Temp.DeliveryDate BETWEEN :Setting_StartDate AND :Setting_EndDate
+        AND PL_Temp.DeliveryDate BETWEEN :Setting_StartDate AND DATEFORMAT(:Setting_EndDate, 'YYYY-MM-DD')
 ) PL ON PL.PartId = P.Id
 LEFT OUTER JOIN OpeningStockCount ON 1 = 1
     AND OpeningStockCount.PartId = P.Id
@@ -163,8 +147,11 @@ LEFT OUTER JOIN monitor.InventoryMovement IM ON 1 = 1
     AND IM.BusinessTransactionContextType NOT IN (4)
     AND IM.PartId = P.Id
     AND IM.LocationName = PL.LocationName
-    AND IM.DeliveryDate BETWEEN :Setting_StartDate AND :Setting_EndDate
-    AND IM.LoggingTimeStamp <= COALESCE(EndStockCount.LoggingTimeStamp, :Setting_EndDate)
+    AND IM.DeliveryDate BETWEEN :Setting_StartDate AND DATEFORMAT(:Setting_EndDate, 'YYYY-MM-DD')
+    AND IM.LoggingTimeStamp <= CASE 
+        WHEN 1 = :Setting_WOClockED THEN COALESCE(EndStockCount.LoggingTimeStamp, DATEFORMAT(:Setting_EndDate, 'YYYY-MM-DD'))
+        ELSE :Setting_EndDate
+    END
 WHERE 1 = 1
     AND P.Status NOT IN (9)
     AND P.CategoryString NOT LIKE 'E%'
